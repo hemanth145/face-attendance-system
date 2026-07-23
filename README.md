@@ -6,12 +6,13 @@ logging — built with OpenCV and dlib.
 ## How it works
 
 1. **Enroll a face** — upload a reference photo and a name. The app computes a 128-d face
-   encoding (dlib, via `face_recognition`) and keeps it in memory for the session.
+   encoding (dlib's ResNet face-recognition model) and keeps it in memory for the session.
 2. **Live webcam** — every frame is preprocessed with grayscale conversion + histogram
    equalization, then run through an Adaboost/Haar cascade classifier to box faces in real time.
    Every 10th frame is handed off to a background thread that computes facial landmarks and a
-   face encoding, then matches it against enrolled faces — this keeps the live video loop fast
-   while the heavier recognition work happens off the main thread.
+   face encoding (dlib's HOG detector + 68-point shape predictor), then matches it against
+   enrolled faces — this keeps the live video loop fast while the heavier recognition work
+   happens off the main thread.
 3. **Upload a photo** — same detection + recognition pipeline, run once against a still image,
    for anyone who'd rather not use their webcam.
 4. **Attendance log** — recognized faces are logged with a timestamp (60s cooldown per person to
@@ -23,7 +24,8 @@ is persisted to disk or a database.
 ## Tech stack
 
 - Python, OpenCV (Haar cascade detection, histogram equalization)
-- dlib / `face_recognition` (facial landmark detection, 128-d face encodings)
+- dlib (HOG face detector, 68-point landmarks, 128-d face encodings) — called directly rather
+  than through the `face_recognition` wrapper package, see note below
 - Streamlit + `streamlit-webrtc` (browser webcam access, deployable web UI)
 - Threading (background recognition worker, decoupled from the video callback)
 
@@ -38,12 +40,16 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-> **Windows note:** `dlib` has no official prebuilt wheel for newer Python versions and needs a
-> C++ compiler (CMake + MSVC) to build from source. If you don't have those installed, use the
-> [`dlib-bin`](https://pypi.org/project/dlib-bin/) package instead (prebuilt wheels, same `import
-> dlib` API) — `pip install dlib-bin` before installing the rest of `requirements.txt`, and remove
-> the `dlib` line so pip doesn't try to rebuild it. On Linux (including Streamlit Cloud), `dlib`
-> builds fine from source as long as `cmake` and a C++ toolchain are available (see `apt.txt`).
+> **Why `dlib-bin` instead of `dlib`:** the real `dlib` PyPI package ships only a source tarball —
+> no prebuilt wheels on any platform — so installing it means compiling from scratch every time
+> (tens of minutes, and it needs a C++ compiler + CMake). [`dlib-bin`](https://pypi.org/project/dlib-bin/)
+> publishes prebuilt wheels for Linux/macOS/Windows and installs in seconds; it's an
+> unofficial but widely-used drop-in (same `import dlib`). The catch: the popular
+> `face_recognition` wrapper package hard-declares a dependency on real `dlib`, so it can't be
+> used alongside `dlib-bin` via a plain `pip install -r requirements.txt`. This repo calls dlib's
+> HOG detector, shape predictor, and face-recognition model directly instead (see
+> `src/recognizer.py`) — the same three primitives `face_recognition` wraps, using the same
+> bundled models via `face_recognition_models`.
 
 ## Running tests
 
@@ -61,10 +67,10 @@ accuracy yourself via the Enroll and Upload-a-photo tabs with your own photos.
 1. Push this repo to GitHub.
 2. On [share.streamlit.io](https://share.streamlit.io): New app → select this repo → main file
    `app.py`.
-3. Streamlit Cloud reads `apt.txt` automatically to install system build dependencies (`cmake`,
-   `build-essential`, etc.) before `pip install -r requirements.txt` — no extra configuration
-   needed.
-4. First deploy will take a while (dlib compiles from source, typically several minutes).
+3. A `.python-version` file pins Python 3.11 — Streamlit Cloud's `uv`-based installer reads this
+   (not the older `runtime.txt` convention) to pick the interpreter.
+4. `apt.txt` installs `ffmpeg`, needed by `av`/`streamlit-webrtc`. No C++ build toolchain is
+   needed since `dlib-bin` is a prebuilt wheel — deploys take well under a minute.
 
 **Live webcam tab caveat:** `streamlit-webrtc` needs a STUN server for the browser to reach the
 deployed server; this app is configured with Google's public STUN server, which works for most
