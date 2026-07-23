@@ -1,7 +1,18 @@
-"""Facial landmark detection and recognition, built on dlib via the
-face_recognition package. The (comparatively expensive) landmark + encoding
-pipeline runs on a background thread via RecognitionWorker so a live video
-callback can keep processing frames without blocking.
+"""Facial landmark detection and recognition, built directly on dlib
+(HOG face detector + 68-point shape predictor + ResNet face encoder).
+
+This intentionally avoids the `face_recognition` package: it hard-declares
+a dependency on the real `dlib` PyPI package, which ships no prebuilt
+wheels and must compile from source (~45 minutes on Streamlit Cloud). We
+use `dlib-bin` instead, which has prebuilt wheels for Linux/macOS/Windows
+and installs in seconds -- but `pip`/`uv` won't recognize it as satisfying
+`face_recognition`'s declared "dlib>=19.7" requirement, so we call dlib's
+API ourselves using the same models `face_recognition` bundles via
+`face_recognition_models`.
+
+The (comparatively expensive) landmark + encoding pipeline runs on a
+background thread via RecognitionWorker so a live video callback can keep
+processing frames without blocking.
 """
 from __future__ import annotations
 
@@ -10,10 +21,15 @@ import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
-import face_recognition
+import dlib
+import face_recognition_models
 import numpy as np
 
 DEFAULT_MATCH_TOLERANCE = 0.6
+
+_face_detector = dlib.get_frontal_face_detector()
+_pose_predictor = dlib.shape_predictor(face_recognition_models.pose_predictor_model_location())
+_face_encoder = dlib.face_recognition_model_v1(face_recognition_models.face_recognition_model_location())
 
 
 @dataclass
@@ -24,21 +40,35 @@ class RecognitionResult:
     landmarks: dict = field(default_factory=dict)
 
 
+def _rect_to_box(rect: "dlib.rectangle") -> tuple[int, int, int, int]:
+    return rect.top(), rect.right(), rect.bottom(), rect.left()
+
+
+def face_locations(image_rgb: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Detect faces, returning (top, right, bottom, left) boxes."""
+    return [_rect_to_box(rect) for rect in _face_detector(image_rgb, 1)]
+
+
 def encode_face(image_rgb: np.ndarray):
     """Return the first face's (encoding, location) found in an RGB image,
     or (None, None) if no face is found.
     """
-    locations = face_recognition.face_locations(image_rgb)
-    if not locations:
+    detections = _face_detector(image_rgb, 1)
+    if not detections:
         return None, None
-    encodings = face_recognition.face_encodings(image_rgb, known_face_locations=locations)
-    if not encodings:
-        return None, None
-    return encodings[0], locations[0]
+
+    shape = _pose_predictor(image_rgb, detections[0])
+    encoding = np.array(_face_encoder.compute_face_descriptor(image_rgb, shape))
+    return encoding, _rect_to_box(detections[0])
 
 
-def get_landmarks(image_rgb: np.ndarray) -> list[dict]:
-    return face_recognition.face_landmarks(image_rgb)
+def get_landmarks(image_rgb: np.ndarray) -> list[list[tuple[int, int]]]:
+    """Return raw 68-point landmark coordinates for each detected face."""
+    landmarks = []
+    for rect in _face_detector(image_rgb, 1):
+        shape = _pose_predictor(image_rgb, rect)
+        landmarks.append([(p.x, p.y) for p in shape.parts()])
+    return landmarks
 
 
 def match_encoding(
